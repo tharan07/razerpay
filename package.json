@@ -6,15 +6,18 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "test": "tsx --test tests/action-executor.test.ts tests/action-planner.test.ts tests/action-scheduler.test.ts tests/ai-message.test.ts tests/ai-provider.test.ts tests/ai-recommendation.test.ts tests/audit-logger.test.ts tests/case-service.test.ts tests/classifier.test.ts tests/cron-recovery.test.ts tests/dashboard.test.ts tests/duplicate-webhooks.test.ts tests/email-recovery.test.ts tests/policy-engine.test.ts tests/production-security.test.ts tests/webhook-route.test.ts tests/webhook-verification.test.ts"
   },
   "dependencies": {
     "@supabase/ssr": "^0.12.5",
     "@supabase/supabase-js": "^2.112.4",
+    "lucide-react": "^1.37.0",
     "next": "16.3.3",
     "razorpay": "^2.9.8",
     "react": "19.2.8",
     "react-dom": "19.2.8",
+    "recharts": "^3.10.1",
     "resend": "^6.25.0",
     "server-only": "^0.0.1",
     "zod": "^4.5.2"
@@ -27,6 +30,7 @@
     "eslint": "^9",
     "eslint-config-next": "16.3.3",
     "tailwindcss": "^4",
+    "tsx": "^4.23.12",
     "typescript": "^5"
   }
 }
