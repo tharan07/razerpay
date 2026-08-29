@@ -1,5 +1,6 @@
 import { createClient as createServerClient } from '@/lib/supabase/server';
 import { logAuditEvent } from '@/lib/audit/logger';
+import { evaluatePolicy } from '@/lib/policy/policy-engine';
 import {
   createRecoveryCase,
   updateCaseStatus,
@@ -11,6 +12,7 @@ import {
   syncSubscriptionState,
 } from '@/lib/razorpay/subscription-service';
 import { RazorpayWebhookPayload } from '@/types/razorpay';
+import { PolicyInput, RecoveryStrategy } from '@/types/recovery';
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
 
 export interface StoreWebhookEventInput {
@@ -114,7 +116,8 @@ export async function storeWebhookEvent(
 
 /**
  * Processes a stored Razorpay webhook event: updates subscription/payment state,
- * classifies failure, manages recovery cases, logs audit events, and updates outcomes.
+ * classifies failure, evaluates policy engine, manages recovery cases, logs audit events,
+ * and handles recovery outcomes.
  *
  * Marks event status PROCESSED upon completion.
  */
@@ -217,7 +220,7 @@ export async function processStoredWebhookEvent(
           db
         );
 
-        // Advance state NEW -> CLASSIFIED -> VERIFYING via state machine validation
+        // Advance state NEW -> CLASSIFIED -> VERIFYING -> POLICY_PENDING
         if (canTransition(targetCase.status, 'CLASSIFIED')) {
           const c1 = await updateCaseStatus(
             targetCase.id,
@@ -253,6 +256,143 @@ export async function processStoredWebhookEvent(
               },
               db
             );
+
+            if (canTransition(c2.status, 'POLICY_PENDING')) {
+              const c3 = await updateCaseStatus(
+                c2.id,
+                'POLICY_PENDING',
+                undefined,
+                db
+              );
+
+              // Evaluate Policy Engine
+              const policyInput: PolicyInput = {
+                caseId: c3.id,
+                subscriptionStatus: subscription.current_status || 'halted',
+                failureCategory: failureCategory,
+                amount: attempt.amount || subscription.amount || 0,
+                retryCount: c3.retry_count,
+                contactAttemptCount: c3.contact_attempt_count,
+                customerOptedOut: false,
+                quietHoursActive: false,
+                allowedRecoveryWindow: true,
+              };
+
+              const decisionResult = evaluatePolicy(policyInput);
+
+              await logAuditEvent(
+                {
+                  recoveryCaseId: c3.id,
+                  eventType: 'POLICY_EVALUATED',
+                  actor: 'policy_engine',
+                  decision: {
+                    allowed: decisionResult.allowed,
+                    decision: decisionResult.decision,
+                    allowedActions: decisionResult.allowedActions,
+                  },
+                  reason: `Policy decision: ${decisionResult.decision}`,
+                },
+                db
+              );
+
+              if (decisionResult.decision === 'ALLOW') {
+                if (canTransition(c3.status, 'ACTION_PLANNED')) {
+                  const firstAction = (decisionResult.allowedActions[0] as RecoveryStrategy) || 'WAIT_AND_MONITOR';
+                  const c4 = await updateCaseStatus(
+                    c3.id,
+                    'ACTION_PLANNED',
+                    { recoveryStrategy: firstAction },
+                    db
+                  );
+                  await logAuditEvent(
+                    {
+                      recoveryCaseId: c4.id,
+                      eventType: 'ACTION_PLANNED',
+                      actor: 'policy_engine',
+                      previousState: 'POLICY_PENDING',
+                      newState: 'ACTION_PLANNED',
+                    },
+                    db
+                  );
+                }
+              } else if (decisionResult.decision === 'BLOCK') {
+                if (canTransition(c3.status, 'BLOCKED')) {
+                  const c4 = await updateCaseStatus(
+                    c3.id,
+                    'BLOCKED',
+                    { stopReason: decisionResult.blockedReasons.join(', ') },
+                    db
+                  );
+                  await logAuditEvent(
+                    {
+                      recoveryCaseId: c4.id,
+                      eventType: 'ACTION_BLOCKED',
+                      actor: 'policy_engine',
+                      reason: decisionResult.blockedReasons.join(', '),
+                      previousState: 'POLICY_PENDING',
+                      newState: 'BLOCKED',
+                    },
+                    db
+                  );
+                }
+              } else if (decisionResult.decision === 'ESCALATE') {
+                if (canTransition(c3.status, 'BLOCKED')) {
+                  const c4 = await updateCaseStatus(
+                    c3.id,
+                    'BLOCKED',
+                    { stopReason: decisionResult.blockedReasons.join(', ') },
+                    db
+                  );
+                  if (canTransition(c4.status, 'ESCALATED')) {
+                    const c5 = await updateCaseStatus(
+                      c4.id,
+                      'ESCALATED',
+                      undefined,
+                      db
+                    );
+                    await logAuditEvent(
+                      {
+                        recoveryCaseId: c5.id,
+                        eventType: 'CASE_ESCALATED',
+                        actor: 'policy_engine',
+                        reason: decisionResult.blockedReasons.join(', '),
+                        previousState: 'BLOCKED',
+                        newState: 'ESCALATED',
+                      },
+                      db
+                    );
+                  }
+                }
+              } else if (decisionResult.decision === 'STOP') {
+                if (canTransition(c3.status, 'BLOCKED')) {
+                  const c4 = await updateCaseStatus(
+                    c3.id,
+                    'BLOCKED',
+                    { stopReason: decisionResult.blockedReasons.join(', ') },
+                    db
+                  );
+                  if (canTransition(c4.status, 'STOPPED')) {
+                    const c5 = await updateCaseStatus(
+                      c4.id,
+                      'STOPPED',
+                      undefined,
+                      db
+                    );
+                    await logAuditEvent(
+                      {
+                        recoveryCaseId: c5.id,
+                        eventType: 'CASE_STOPPED',
+                        actor: 'policy_engine',
+                        reason: decisionResult.blockedReasons.join(', '),
+                        previousState: 'BLOCKED',
+                        newState: 'STOPPED',
+                      },
+                      db
+                    );
+                  }
+                }
+              }
+            }
           }
         }
       }

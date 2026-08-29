@@ -373,7 +373,7 @@ describe('Phase 3.6 — Duplicate Webhook Testing & Processing Verification', ()
     assert.strictEqual(db.recoveryCases.size, 1);
 
     const openCase = Array.from(db.recoveryCases.values())[0];
-    assert.strictEqual(openCase.status, 'VERIFYING');
+    assert.strictEqual(openCase.status, 'ACTION_PLANNED');
 
     // Send payment success webhook
     const successPayload = JSON.stringify({
